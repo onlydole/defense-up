@@ -74,7 +74,7 @@ jobs:
       - name: Generate Python SBOM
         run: |
           pip install cyclonedx-bom
-          cyclonedx-py requirements -i requirements.txt -o requirements-sbom.json --format json
+          cyclonedx-py requirements -i requirements.txt -o requirements-sbom.json --output-format json
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
