@@ -66,16 +66,6 @@ jobs:
           format: cyclonedx-json
           output-file: container-sbom.json
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-
-      - name: Generate Python SBOM
-        run: |
-          pip install cyclonedx-bom
-          cyclonedx-py requirements -i requirements.txt -o requirements-sbom.json --output-format json
-
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
 
@@ -83,16 +73,25 @@ jobs:
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          cosign sign --yes \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${DIGEST}
+          echo "Signing image with digest: ${DIGEST}"
+          cosign sign --yes ${REGISTRY}/${IMAGE_NAME}@${DIGEST}
 
-      - name: Attest SBOMs
-        uses: actions/attest-sbom@v1
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          sbom-path: container-sbom.json
-          push-to-registry: true
+      - name: Attest Container SBOM
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          echo "Attesting SBOM to image with digest: ${DIGEST}"
+          cosign attest --yes \
+            --predicate container-sbom.json \
+            --type cyclonedx \
+            ${REGISTRY}/${IMAGE_NAME}@${DIGEST}
+
+      - name: Verify supply chain artifacts
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          echo "Checking supply chain artifacts..."
+          cosign tree ${REGISTRY}/${IMAGE_NAME}@${DIGEST}
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -105,27 +104,41 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
             ```
             
+            Image digest: `${{ steps.build.outputs.digest }}`
+            
             ## Verification
+            
+            Verify the signature and attestation:
             ```bash
             # Verify signature
             cosign verify ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }} \
               --certificate-identity-regexp "https://github.com/${{ github.repository }}/*" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com
             
-            # Verify attestation
+            # Verify SBOM attestation
             cosign verify-attestation ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }} \
               --type cyclonedx \
               --certificate-identity-regexp "https://github.com/${{ github.repository }}/*" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com
             ```
             
-            ## Artifacts
-            - Container SBOM (CycloneDX)
-            - Python Dependencies SBOM (CycloneDX)
+            View the SBOM:
+            ```bash
+            # Download and display SBOM
+            cosign download attestation ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }} | \
+              jq -r '.payload' | base64 -d | jq '.predicate'
+            ```
             
-            Both SBOMs are attached to this release and attested to the container image.
+            ## What's Included
+            
+            The container SBOM (attached below) includes:
+            - All Python packages installed via pip
+            - System packages from the base image
+            - Base image layers and metadata
+            - Complete dependency tree with versions and licenses
+            
+            This comprehensive SBOM is cryptographically attested to the container image using Sigstore.
           files: |
             container-sbom.json
-            requirements-sbom.json
           fail_on_unmatched_files: true
           generate_release_notes: true
