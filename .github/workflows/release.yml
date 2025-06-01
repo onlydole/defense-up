@@ -62,10 +62,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # Generate SLSA provenance attestation
           provenance: mode=max
-          # Generate in-toto SBOM attestation  
-          sbom: true
 
       - name: Generate SBOM with Syft
         uses: anchore/sbom-action@v0
@@ -87,27 +84,20 @@ jobs:
           done
           cosign sign --yes ${images}
 
-      - name: Attest SBOM to container
-        env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          cosign attest --yes \
-            --predicate container-sbom.json \
-            --type cyclonedx \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${DIGEST}
-
       - name: Generate build provenance attestation
         uses: actions/attest-build-provenance@v1
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: false
 
-      - name: Generate SBOM attestation for GitHub
+      - name: Generate SBOM attestation  
         uses: actions/attest-sbom@v1
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.build.outputs.digest }}
           sbom-path: container-sbom.json
+          push-to-registry: false
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -128,58 +118,35 @@ jobs:
             
             **Image digest:** `${{ steps.build.outputs.digest }}`
             
-            ## Supply Chain Security
+            ## Verification
             
-            This release includes multiple layers of attestation and verification:
-            
-            ### 1. Container Signatures
-            Verify the image signature:
+            ### Container Signature
             ```bash
             cosign verify ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }} \
               --certificate-identity-regexp "https://github.com/${{ github.repository }}/*" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com
             ```
             
-            ### 2. SBOM Attestation
-            Verify and download the SBOM:
-            ```bash
-            # Verify SBOM attestation
-            cosign verify-attestation ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }} \
-              --type cyclonedx \
-              --certificate-identity-regexp "https://github.com/${{ github.repository }}/*" \
-              --certificate-oidc-issuer https://token.actions.githubusercontent.com
+            ### GitHub Attestations
+            View attestations in GitHub UI: https://github.com/${{ github.repository }}/attestations
             
-            # Download SBOM from attestation
-            cosign download attestation ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }} \
-              --predicate-type cyclonedx | jq -r '.payload' | base64 -d | jq '.predicate' > sbom.json
+            The following attestations are available:
+            - ✅ Build provenance attestation
+            - ✅ SBOM attestation (CycloneDX format)
+            
+            ### View Supply Chain Security
+            ```bash
+            # View signatures
+            cosign tree ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            
+            # Download SBOM from release artifacts
+            gh release download ${{ github.ref_name }} -p "*.json" -R ${{ github.repository }}
             ```
             
-            ### 3. SLSA Provenance
-            Verify build provenance:
-            ```bash
-            cosign verify-attestation ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }} \
-              --type slsaprovenance \
-              --certificate-identity-regexp "https://github.com/${{ github.repository }}/*" \
-              --certificate-oidc-issuer https://token.actions.githubusercontent.com
-            ```
+            ## Included Artifacts
             
-            ### 4. GitHub Attestations
-            View all attestations in GitHub UI: https://github.com/${{ github.repository }}/attestations
-            
-            Download via GitHub CLI:
-            ```bash
-            gh attestation download ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }} -o attestations/
-            ```
-            
-            ## What's Included
-            
-            - **Container image** for linux/amd64 and linux/arm64
-            - **Signatures** on all image tags and digest
-            - **SBOM** (Software Bill of Materials) in CycloneDX format
-            - **SLSA Build Provenance** (Level 3)
-            - **GitHub Attestations** for build provenance and SBOM
-            
-            The SBOM includes all components in the container:
-            - Python packages (direct and transitive dependencies)
-            - System packages from the base image
-            - Image layers and metadata
+            - ✅ Multi-platform container image (linux/amd64, linux/arm64)
+            - ✅ Container signature (Sigstore/Cosign)
+            - ✅ SBOM in CycloneDX format (attached to release)
+            - ✅ Build provenance metadata (in image manifest)
+            - ✅ GitHub attestations for supply chain transparency
