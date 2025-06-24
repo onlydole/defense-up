@@ -1,24 +1,20 @@
-FROM python:3.13-slim AS builder
-
-WORKDIR /src
-
-COPY requirements.txt .
-RUN pip install --upgrade pip \
-    && pip install --prefix=/install --no-cache-dir -r requirements.txt
-
-COPY app/ ./app
-
-FROM python:3.13-slim
-
-RUN useradd --create-home --shell /bin/bash flaskuser
-
-COPY --from=builder /install /usr/local
-COPY --from=builder /src/app /app
-
-EXPOSE 5000
-
-USER flaskuser
+FROM cgr.dev/chainguard/python:latest-dev AS builder
 
 WORKDIR /app
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "main:app"]
+COPY requirements.txt .
+RUN pip install --target=/app/packages --no-cache-dir --require-hashes \
+    --disable-pip-version-check \
+    --no-compile \
+    -r requirements.txt
+
+COPY . .
+
+FROM gcr.io/distroless/python3-debian12:nonroot
+
+COPY --from=builder /app /app
+
+WORKDIR /app
+EXPOSE 5000
+ENV PYTHONPATH=/app/packages
+CMD ["app/main.py"]
