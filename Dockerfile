@@ -1,4 +1,4 @@
-FROM python:3.11-slim AS builder
+FROM python:3.13-slim AS builder
 
 WORKDIR /src
 
@@ -8,7 +8,7 @@ RUN pip install --upgrade pip \
 
 COPY app/ ./app
 
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 RUN useradd --create-home --shell /bin/bash flaskuser
 
