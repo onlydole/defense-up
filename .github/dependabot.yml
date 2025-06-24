@@ -9,3 +9,13 @@ updates:
         patterns:
           - "*"
     rebase-strategy: "auto"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    groups:
+      github-actions-updates:
+        patterns:
+          - "*"
+    rebase-strategy: "auto"
