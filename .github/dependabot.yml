@@ -1,21 +1,43 @@
 version: 2
 updates:
+  # Base images in the Dockerfile. Each FROM line pins a digest, and Dependabot
+  # bumps it. One group keeps the builder and runtime images moving together.
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
       interval: "daily"
+    # Wait 7 days after a release before proposing it, so a bad or hijacked
+    # release has time to get caught and pulled first.
+    cooldown:
+      default-days: 7
     groups:
       docker-updates:
         patterns:
           - "*"
     rebase-strategy: "auto"
 
+  # Actions in .github/workflows, pinned by commit SHA with a version comment.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "daily"
+    cooldown:
+      default-days: 7
     groups:
       github-actions-updates:
+        patterns:
+          - "*"
+    rebase-strategy: "auto"
+
+  # Python packages in requirements.txt, locked with hashes.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    cooldown:
+      default-days: 7
+    groups:
+      pip-updates:
         patterns:
           - "*"
     rebase-strategy: "auto"

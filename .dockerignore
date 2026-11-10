@@ -1,13 +1,9 @@
-__pycache__
-*.pyc
-*.pyo
-*.pyd
-.git
-.env
-.venv
-env/
-venv/
-*.log
-.coverage
-.pytest_cache
-requirements.in
+# Allowlist the build context. Docker sends only these paths to the builder,
+# so workflows, docs, and local files never reach an image layer.
+*
+!app/
+!requirements.txt
+
+# Drop bytecode and caches even inside the allowed paths.
+**/__pycache__
+**/*.py[cod]
