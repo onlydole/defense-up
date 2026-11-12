@@ -14,4 +14,4 @@ Defense-Up is a demonstration project. We fix security issues in the latest rele
 
 ## Verifying releases
 
-The release workflow signs each image with cosign and creates GitHub attestations for its build provenance and SBOM. The [README](README.md#verify-it-yourself) lists the commands to check them.
+The release workflow signs each image with cosign and creates GitHub attestations for its build provenance and SBOMs. The [README](README.md#verify-it-yourself) lists the commands to check them.

@@ -16,7 +16,8 @@ concurrency:
 jobs:
   build:
     name: Build image (no push)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read # check out the PR source
     steps:
@@ -28,6 +29,18 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Run the unit tests inside the builder image, against the same locked
+      # packages the runtime image gets.
+      - name: Run unit tests
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: test
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       # Build both platforms the release ships. Nothing is pushed, so this job
       # needs no registry login and no packages permission.
@@ -54,7 +67,8 @@ jobs:
           tags: defense-up:pr
           cache-from: type=gha
 
-      # Prove the image starts as a non-root user and gunicorn answers.
+      # Prove the image starts as a non-root user and gunicorn answers, with the
+      # same restrictions docker-compose.yml and the Kubernetes example apply.
       - name: Smoke test
         run: |
           user="$(docker image inspect --format '{{.Config.User}}' defense-up:pr)"
@@ -64,10 +78,32 @@ jobs:
             exit 1
           fi
 
-          docker run --detach --name smoke --publish 5000:5000 defense-up:pr
+          docker run --detach --name smoke \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --memory 128m \
+            --pids-limit 64 \
+            --publish 127.0.0.1:5000:5000 \
+            defense-up:pr
           trap 'docker logs smoke; docker rm --force smoke' EXIT
 
           curl --fail --silent --show-error --retry 10 --retry-delay 1 \
             --retry-all-errors http://127.0.0.1:5000/
           echo
+          curl --fail --silent --show-error http://127.0.0.1:5000/healthz
+          echo
+          curl --silent --show-error --head http://127.0.0.1:5000/ \
+            | grep --ignore-case --quiet "x-content-type-options: nosniff"
           docker logs smoke 2>&1 | grep --quiet "gunicorn"
+
+      # Fail the PR if the image carries a high or critical vulnerability that
+      # already has a fix. Findings without a fix are listed but don't block.
+      - name: Scan image for vulnerabilities
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: defense-up:pr
+          fail-build: true
+          severity-cutoff: high
+          only-fixed: true
+          output-format: table

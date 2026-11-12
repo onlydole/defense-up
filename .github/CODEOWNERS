@@ -1,0 +1,11 @@
+# Every change needs a review from the maintainer.
+* @onlydole
+
+# The pipeline, the image definition, and the dependency locks decide what
+# gets built and signed. They're listed on their own so the rule stays visible
+# if the default owner above ever changes.
+/.github/ @onlydole
+/Dockerfile @onlydole
+/requirements.in @onlydole
+/requirements.txt @onlydole
+/deploy/ @onlydole

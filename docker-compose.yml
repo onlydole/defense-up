@@ -2,5 +2,19 @@ services:
   web:
     build:
       context: .
+    # Publish on loopback only, so the demo isn't reachable from the network.
     ports:
-      - "5001:5000"
+      - "127.0.0.1:5001:5000"
+    # The root filesystem is read-only. Gunicorn keeps its heartbeat files in
+    # /dev/shm, which stays writable and lives in memory.
+    read_only: true
+    # Drop every Linux capability. The app binds a high port and needs none.
+    cap_drop:
+      - ALL
+    # Block privilege escalation through setuid binaries.
+    security_opt:
+      - no-new-privileges:true
+    # Cap memory and process count so a runaway process can't starve the host.
+    mem_limit: 128m
+    pids_limit: 64
+    restart: unless-stopped

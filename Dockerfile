@@ -5,7 +5,7 @@
 
 # Builder: has pip and a shell. Nothing from this stage ships except the
 # installed packages.
-FROM cgr.dev/chainguard/python:latest-dev@sha256:62c16c709c48c8e66647c843b5aceeac81d4523134c742bc017a46f5a86ba5dd AS builder
+FROM cgr.dev/chainguard/python:latest-dev@sha256:c0553ee682a37a13dc2710716bc1a041d374cd4474379ca1a101044adcdabffe AS builder
 
 WORKDIR /app
 
@@ -19,8 +19,19 @@ RUN pip install --target=/app/packages --no-cache-dir --require-hashes \
     --no-compile \
     -r requirements.txt
 
+# Test: runs the unit tests against the same locked packages the runtime gets.
+# Build it with `docker build --target test .`. A normal build skips this
+# stage, and nothing from it ships.
+FROM builder AS test
+
+COPY app/ /app/app/
+COPY tests/ /app/tests/
+
+RUN PYTHONPATH=/app/packages PYTHONDONTWRITEBYTECODE=1 \
+    python -m unittest discover --start-directory tests --top-level-directory . --verbose
+
 # Runtime: no shell, no package manager, and a non-root user by default.
-FROM cgr.dev/chainguard/python:latest@sha256:c932048a3f1db1fecefbd589d4fb90bf1d364b4c1ebd9aa8c866f29bb93e88cc
+FROM cgr.dev/chainguard/python:latest@sha256:0ce856292cb65f45ee233c5ef7fcf55bd5210102af01a08efb392c3495195909
 
 WORKDIR /app
 
@@ -38,6 +49,13 @@ USER 65532:65532
 
 EXPOSE 5000
 
+# The image has no shell or curl, so the check uses the Python it already ships.
+# Docker and Compose honor this. Kubernetes ignores it and uses its own probes.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD ["/usr/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/healthz', timeout=2)"]
+
 # Serve with gunicorn, a production WSGI server, instead of Flask's dev server.
+# --worker-tmp-dir /dev/shm keeps gunicorn's heartbeat files in memory, so the
+# container runs with a read-only root filesystem.
 ENTRYPOINT ["/usr/bin/python", "-m", "gunicorn"]
-CMD ["--bind", "0.0.0.0:5000", "--access-logfile", "-", "app.main:app"]
+CMD ["--bind", "0.0.0.0:5000", "--worker-tmp-dir", "/dev/shm", "--access-logfile", "-", "app.main:app"]

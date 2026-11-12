@@ -2,6 +2,7 @@
 # so workflows, docs, and local files never reach an image layer.
 *
 !app/
+!tests/
 !requirements.txt
 
 # Drop bytecode and caches even inside the allowed paths.

@@ -1,0 +1,34 @@
+# These policies only take effect with a network plugin that enforces
+# NetworkPolicy, such as Calico or Cilium. Without one, the API server accepts
+# them and nothing is blocked.
+
+# Deny all ingress and egress for every pod in the namespace. The app makes no
+# outbound calls and needs no DNS, so egress stays closed.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: defense-up
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Allow ingress to the app on TCP 5000 only, from any source. Narrow the
+# source with a "from" block if only your ingress controller should reach it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-http
+  namespace: defense-up
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: defense-up
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 5000
