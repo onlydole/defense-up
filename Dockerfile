@@ -5,7 +5,7 @@
 
 # Builder: has pip and a shell. Nothing from this stage ships except the
 # installed packages.
-FROM cgr.dev/chainguard/python:latest-dev@sha256:62c16c709c48c8e66647c843b5aceeac81d4523134c742bc017a46f5a86ba5dd AS builder
+FROM cgr.dev/chainguard/python:latest-dev@sha256:c0553ee682a37a13dc2710716bc1a041d374cd4474379ca1a101044adcdabffe AS builder
 
 WORKDIR /app
 
@@ -20,7 +20,7 @@ RUN pip install --target=/app/packages --no-cache-dir --require-hashes \
     -r requirements.txt
 
 # Runtime: no shell, no package manager, and a non-root user by default.
-FROM cgr.dev/chainguard/python:latest@sha256:c932048a3f1db1fecefbd589d4fb90bf1d364b4c1ebd9aa8c866f29bb93e88cc
+FROM cgr.dev/chainguard/python:latest@sha256:0ce856292cb65f45ee233c5ef7fcf55bd5210102af01a08efb392c3495195909
 
 WORKDIR /app
 
