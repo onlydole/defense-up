@@ -45,7 +45,10 @@ spec:
       - apiGroups: [""]
         apiVersions: [v1]
         operations: [CREATE, UPDATE]
-        resources: [pods]
+        # Kubernetes matches subresources separately. Without the second
+        # entry, someone could add an unsigned ephemeral container to a pod
+        # that was already admitted.
+        resources: [pods, pods/ephemeralcontainers]
   # Check every image in the namespace, not only defense-up images. Anything
   # this workflow didn't sign gets rejected.
   matchImageReferences:
