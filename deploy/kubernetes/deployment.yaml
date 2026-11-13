@@ -1,0 +1,117 @@
+# The app has no reason to call the Kubernetes API, so its service account
+# never gets a token mounted.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: defense-up
+  namespace: defense-up
+  labels:
+    app.kubernetes.io/name: defense-up
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: defense-up
+  namespace: defense-up
+  labels:
+    app.kubernetes.io/name: defense-up
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: defense-up
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: defense-up
+    spec:
+      serviceAccountName: defense-up
+      automountServiceAccountToken: false
+      # Don't inject an environment variable for every Service in the namespace.
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        # 65532 is the nonroot user and group in the Chainguard base image.
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: web
+          # Pin the image by digest, never by tag. Copy the digest from the
+          # "Container image" section of the GitHub release notes for the
+          # version you want. That digest names the multi-platform index, and
+          # it is the digest the release workflow signed.
+          image: ghcr.io/onlydole/defense-up@sha256:REPLACE_WITH_RELEASE_DIGEST
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 5000
+              protocol: TCP
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            # Gunicorn writes its worker heartbeat files to /dev/shm. Container
+            # runtimes such as containerd and CRI-O already mount a writable
+            # tmpfs there, and readOnlyRootFilesystem leaves that mount alone.
+            # This memory-backed emptyDir makes the dependency visible in the
+            # manifest and caps its size. Its contents count against the
+            # container's memory limit.
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: defense-up
+  namespace: defense-up
+  labels:
+    app.kubernetes.io/name: defense-up
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: defense-up
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

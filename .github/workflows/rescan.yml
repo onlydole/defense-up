@@ -1,0 +1,47 @@
+name: Rescan released image
+
+# A release that was clean on the day it shipped can pick up known
+# vulnerabilities later. This scans the image people actually pull.
+on:
+  schedule:
+    - cron: "41 7 * * *"
+  workflow_dispatch:
+
+# Start every job with no token permissions and grant scopes per job.
+permissions: {}
+
+concurrency:
+  group: rescan
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}:latest
+
+jobs:
+  rescan:
+    name: Scan the latest released image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      security-events: write # upload SARIF results to code scanning
+    steps:
+      # The image is public, so Grype pulls it without a token. The job fails
+      # on a high or critical vulnerability that has a fix, which is the cue
+      # to cut a new release.
+      - name: Scan image for vulnerabilities
+        id: scan
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: ${{ env.IMAGE }}
+          fail-build: true
+          severity-cutoff: high
+          only-fixed: true
+          output-format: sarif
+
+      # Upload the findings even when the scan step fails the job.
+      - name: Upload results to code scanning
+        if: ${{ !cancelled() && steps.scan.outputs.sarif != '' }}
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif }}
+          category: grype-latest

@@ -6,7 +6,8 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      # Semantic version tags only. The guard job checks the full pattern.
+      - "v[0-9]+.[0-9]+.[0-9]+"
 
 # Start every job with no token permissions and grant scopes per job.
 permissions: {}
@@ -20,14 +21,52 @@ env:
   IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
+  guard:
+    name: Check the tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # fetch history to compare the tag with main
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history, so the ancestry check below can see main.
+          fetch-depth: 0
+          # Don't leave the token in .git/config for later steps to read.
+          persist-credentials: false
+
+      - name: Require a plain semantic version tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! printf '%s' "${TAG}" | grep --quiet --extended-regexp '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::${TAG} is not a vMAJOR.MINOR.PATCH tag"
+            exit 1
+          fi
+
+      # A tag can point at any commit, including one on a branch that never
+      # passed review or the required checks. Only release commits that are
+      # already on main.
+      - name: Require the tagged commit to be on main
+        run: |
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::${GITHUB_SHA} is not on main. Tag a commit that merged through a pull request."
+            exit 1
+          fi
+
   build:
-    name: Build and push image
-    runs-on: ubuntu-latest
+    name: Build and push image by digest
+    needs: guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read # check out the tagged source
       packages: write # push the image to GHCR
     outputs:
       digest: ${{ steps.build.outputs.digest }}
+      digest-amd64: ${{ steps.platforms.outputs.amd64 }}
+      digest-arm64: ${{ steps.platforms.outputs.arm64 }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,17 +84,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract tags and labels
+      # Labels only. The promote job adds the tags after verification.
+      - name: Extract labels
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
-          tags: |
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
 
+      # Push by digest with no tag. Nothing can pull this image by name until
+      # the promote job tags it, and that job runs only after verification.
+      #
       # No build cache here. A release builds from a clean slate so a poisoned
       # cache entry from another workflow can't end up in a signed image.
       - name: Build and push image
@@ -64,42 +102,73 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           # BuildKit records how the image was built and stores it next to the image.
           provenance: mode=max
 
+      # The digest above names the multi-platform index. Each platform also has
+      # its own manifest digest, and the SBOM jobs need those.
+      - name: Look up the digest of each platform
+        id: platforms
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker buildx imagetools inspect --raw "${IMAGE}@${DIGEST}" > index.json
+          for arch in amd64 arm64; do
+            digest="$(jq --raw-output --arg arch "${arch}" \
+              '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest' \
+              index.json)"
+            if ! printf '%s' "${digest}" | grep --quiet --extended-regexp '^sha256:[0-9a-f]{64}$'; then
+              echo "::error::No single linux/${arch} manifest in ${DIGEST}"
+              exit 1
+            fi
+            echo "${arch}=${digest}" >> "${GITHUB_OUTPUT}"
+          done
+
   sbom:
-    name: Generate SBOM
+    name: Generate SBOMs
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     # The image is public, so Syft can pull it without a token. This keeps the
     # third-party SBOM tool away from any write or signing permission.
     permissions: {}
     steps:
-      - name: Generate CycloneDX SBOM with Syft
-        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
-        with:
-          image: ${{ env.IMAGE }}@${{ needs.build.outputs.digest }}
-          format: cyclonedx-json
-          output-file: container-sbom.json
-          upload-artifact: false
-          upload-release-assets: false
+      - name: Install Syft
+        id: syft
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
 
-      # Hand the exact SBOM file to the attest and release jobs.
-      - name: Upload SBOM for later jobs
+      # One SBOM per platform. Given a multi-platform index, Syft reads only
+      # the linux/amd64 image, so each platform manifest gets its own scan.
+      - name: Generate a CycloneDX SBOM for each platform
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+          DIGEST_AMD64: ${{ needs.build.outputs.digest-amd64 }}
+          DIGEST_ARM64: ${{ needs.build.outputs.digest-arm64 }}
+        run: |
+          "${SYFT}" scan "registry:${IMAGE}@${DIGEST_AMD64}" --platform linux/amd64 \
+            --output cyclonedx-json=container-sbom-linux-amd64.json
+          "${SYFT}" scan "registry:${IMAGE}@${DIGEST_ARM64}" --platform linux/arm64 \
+            --output cyclonedx-json=container-sbom-linux-arm64.json
+
+      # Hand the exact SBOM files to the attest and release jobs.
+      - name: Upload SBOMs for later jobs
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom
-          path: container-sbom.json
+          path: container-sbom-linux-*.json
           if-no-files-found: error
           retention-days: 7
 
   sign-and-attest:
     name: Sign and attest image
     needs: [build, sbom]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # The release environment can require a reviewer and limit which tags may
+    # deploy, so a person approves before anything gets signed.
+    environment: release
     permissions:
       id-token: write # request a GitHub OIDC token for keyless Sigstore signing
       packages: write # store the signature and attestations next to the image in GHCR
@@ -112,21 +181,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The installer's default cosign version moves with the pinned commit, so
+      # Dependabot updates cosign whenever it updates this action.
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        with:
-          cosign-release: "v3.1.4"
 
-      # Sign the digest once. Every tag points at this digest, so one signature
-      # covers them all. cosign v3 writes a Sigstore bundle as an OCI referrer.
+      # Sign the index digest once. Every tag points at this digest, so one
+      # signature covers them all. cosign v3 writes a Sigstore bundle as an OCI referrer.
       - name: Sign image with cosign (keyless)
         env:
           DIGEST: ${{ needs.build.outputs.digest }}
         run: cosign sign --yes "${IMAGE}@${DIGEST}"
 
-      # download-artifact checks the file against the digest recorded at upload
+      # download-artifact checks the files against the digest recorded at upload
       # and fails on a mismatch.
-      - name: Download SBOM
+      - name: Download SBOMs
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: sbom
@@ -141,31 +210,44 @@ jobs:
           # Storage records only work for organization-owned repositories.
           create-storage-record: false
 
-      - name: Attest SBOM
+      # Each SBOM is attested against the platform image it describes, not
+      # against the index.
+      - name: Attest linux/amd64 SBOM
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ${{ env.IMAGE }}
-          subject-digest: ${{ needs.build.outputs.digest }}
-          sbom-path: container-sbom.json
+          subject-digest: ${{ needs.build.outputs.digest-amd64 }}
+          sbom-path: container-sbom-linux-amd64.json
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest linux/arm64 SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ needs.build.outputs.digest-arm64 }}
+          sbom-path: container-sbom-linux-arm64.json
           push-to-registry: true
           create-storage-record: false
 
   verify:
     name: Verify signature and attestations
     needs: [build, sign-and-attest]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # Read only. This job checks the work of the jobs above the same way a
-    # user would, and the release only publishes if every check passes.
+    # user would. The image gets its tags and the release publishes only if
+    # every check passes.
     permissions:
-      attestations: read # look up attestations for the digest
+      attestations: read # look up attestations for the digests
     env:
       DIGEST: ${{ needs.build.outputs.digest }}
+      DIGEST_AMD64: ${{ needs.build.outputs.digest-amd64 }}
+      DIGEST_ARM64: ${{ needs.build.outputs.digest-arm64 }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        with:
-          cosign-release: "v3.1.4"
 
       # Exact identity, not a regular expression. Only this workflow file,
       # running for this tag, can produce a signature that passes.
@@ -180,24 +262,86 @@ jobs:
           gh attestation verify "oci://${IMAGE}@${DIGEST}" \
             --repo "${GITHUB_REPOSITORY}" \
             --cert-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
+            --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
             --deny-self-hosted-runners
 
-      - name: Verify SBOM attestation
+      - name: Verify SBOM attestations
         run: |
-          gh attestation verify "oci://${IMAGE}@${DIGEST}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --cert-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
-            --predicate-type "https://cyclonedx.org/bom" \
-            --deny-self-hosted-runners
+          for digest in "${DIGEST_AMD64}" "${DIGEST_ARM64}"; do
+            gh attestation verify "oci://${IMAGE}@${digest}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --cert-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
+              --source-ref "${GITHUB_REF}" \
+              --source-digest "${GITHUB_SHA}" \
+              --predicate-type "https://cyclonedx.org/bom" \
+              --deny-self-hosted-runners
+          done
+
+  promote:
+    name: Tag the verified image
+    needs: [build, verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      packages: write # add the release tags to the verified digest in GHCR
+    env:
+      DIGEST: ${{ needs.build.outputs.digest }}
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract tags
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      # Point every tag at the digest that just passed verification. This
+      # copies the existing index, so nothing gets rebuilt.
+      - name: Add tags to the verified digest
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          args=()
+          while IFS= read -r tag; do
+            [ -n "${tag}" ] && args+=(--tag "${tag}")
+          done <<< "${TAGS}"
+          docker buildx imagetools create "${args[@]}" "${IMAGE}@${DIGEST}"
+
+      # Read each tag back from the registry and compare it with the digest.
+      - name: Confirm every tag points at the verified digest
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          while IFS= read -r tag; do
+            [ -n "${tag}" ] || continue
+            actual="$(docker buildx imagetools inspect "${tag}" --format '{{.Manifest.Digest}}')"
+            if [ "${actual}" != "${DIGEST}" ]; then
+              echo "::error::${tag} points at ${actual}, expected ${DIGEST}"
+              exit 1
+            fi
+            echo "${tag} -> ${actual}"
+          done <<< "${TAGS}"
 
   release:
     name: Publish GitHub release
-    needs: [build, verify]
-    runs-on: ubuntu-latest
+    needs: [build, promote]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
-      contents: write # create the release and upload the SBOM asset
+      contents: write # create the release and upload the SBOM assets
     steps:
-      - name: Download SBOM
+      - name: Download SBOMs
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: sbom
@@ -208,6 +352,8 @@ jobs:
       - name: Write release notes
         env:
           DIGEST: ${{ needs.build.outputs.digest }}
+          DIGEST_AMD64: ${{ needs.build.outputs.digest-amd64 }}
+          DIGEST_ARM64: ${{ needs.build.outputs.digest-arm64 }}
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
@@ -220,7 +366,12 @@ jobs:
           docker pull ${IMAGE}@${DIGEST}
           ```
 
-          The `${TAG}` tag points at the same digest.
+          The `${TAG}` tag points at the same digest. That digest names the multi-platform index. Each platform image has its own digest.
+
+          | Platform | Digest |
+          | --- | --- |
+          | linux/amd64 | `${DIGEST_AMD64}` |
+          | linux/arm64 | `${DIGEST_ARM64}` |
 
           ## Verify it yourself
 
@@ -235,22 +386,37 @@ jobs:
           ### Build provenance
 
           ```bash
-          gh attestation verify oci://${IMAGE}@${DIGEST} -R ${REPO}
+          gh attestation verify oci://${IMAGE}@${DIGEST} -R ${REPO} \
+            --signer-workflow ${REPO}/.github/workflows/release.yml \
+            --source-ref refs/tags/${TAG} \
+            --deny-self-hosted-runners
           ```
 
-          ### SBOM attestation
+          ### SBOM attestations
+
+          Each SBOM is attested against the platform image it describes.
 
           ```bash
-          gh attestation verify oci://${IMAGE}@${DIGEST} -R ${REPO} \
-            --predicate-type https://cyclonedx.org/bom
+          gh attestation verify oci://${IMAGE}@${DIGEST_AMD64} -R ${REPO} \
+            --signer-workflow ${REPO}/.github/workflows/release.yml \
+            --source-ref refs/tags/${TAG} \
+            --predicate-type https://cyclonedx.org/bom \
+            --deny-self-hosted-runners
+
+          gh attestation verify oci://${IMAGE}@${DIGEST_ARM64} -R ${REPO} \
+            --signer-workflow ${REPO}/.github/workflows/release.yml \
+            --source-ref refs/tags/${TAG} \
+            --predicate-type https://cyclonedx.org/bom \
+            --deny-self-hosted-runners
           ```
 
-          ### Release and SBOM asset
+          ### Release and SBOM assets
 
           ```bash
           gh release verify ${TAG} -R ${REPO}
-          gh release download ${TAG} -p container-sbom.json -R ${REPO}
-          gh release verify-asset ${TAG} container-sbom.json -R ${REPO}
+          gh release download ${TAG} -p 'container-sbom-linux-*.json' -R ${REPO}
+          gh release verify-asset ${TAG} container-sbom-linux-amd64.json -R ${REPO}
+          gh release verify-asset ${TAG} container-sbom-linux-arm64.json -R ${REPO}
           ```
 
           ## Included artifacts
@@ -258,13 +424,13 @@ jobs:
           - Multi-platform container image for linux/amd64 and linux/arm64
           - Keyless cosign signature stored next to the image in GHCR
           - SLSA build provenance attestation from GitHub
-          - CycloneDX SBOM attestation from GitHub, with the same SBOM attached to this release
+          - One CycloneDX SBOM attestation per platform from GitHub, with the same SBOMs attached to this release
           EOF
           # The single quotes are intentional. envsubst reads the variable list literally.
           # shellcheck disable=SC2016
-          envsubst '${IMAGE} ${DIGEST} ${TAG} ${REPO}' < notes.template.md > notes.md
+          envsubst '${IMAGE} ${DIGEST} ${DIGEST_AMD64} ${DIGEST_ARM64} ${TAG} ${REPO}' < notes.template.md > notes.md
 
-      # With assets, gh creates a draft, uploads the SBOM, and only then
+      # With assets, gh creates a draft, uploads the SBOMs, and only then
       # publishes. That order works with immutable releases, which lock assets
       # at publish time.
       - name: Create release
@@ -272,7 +438,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release create "${TAG}" container-sbom.json \
+          gh release create "${TAG}" \
+            container-sbom-linux-amd64.json container-sbom-linux-arm64.json \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
             --title "Release ${TAG}" \
