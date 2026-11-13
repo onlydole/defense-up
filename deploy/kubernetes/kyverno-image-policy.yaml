@@ -1,0 +1,111 @@
+# Admission policy for the defense-up namespace. Requires Kyverno 1.20 or later.
+#
+# Every container image in a pod in this namespace must
+#   1. be referenced by digest,
+#   2. carry a keyless cosign signature from this repository's release
+#      workflow, running for a vMAJOR.MINOR.PATCH tag, and
+#   3. carry a GitHub SLSA build provenance attestation from that same
+#      workflow and tag.
+#
+# Kyverno also writes rules for Deployments, ReplicaSets, Jobs, and the other
+# pod controllers from this pod rule, so a bad Deployment fails at apply time.
+#
+# ImageValidatingPolicy is the current Kyverno API for image verification.
+# ClusterPolicy is deprecated as of Kyverno 1.17, and Kyverno supports cosign
+# v3 signatures, which are Sigstore bundles stored as OCI referrers, through
+# ImageValidatingPolicy.
+apiVersion: policies.kyverno.io/v1
+kind: ImageValidatingPolicy
+metadata:
+  name: defense-up-signed-releases-only
+  annotations:
+    policies.kyverno.io/title: Signed defense-up releases only
+    policies.kyverno.io/category: Software Supply Chain Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/minversion: 1.20.0
+spec:
+  # Reject the request when a check fails. Use [Audit] to report without
+  # blocking while you roll the policy out.
+  validationActions: [Deny]
+  # If Kyverno can't be reached, reject the pod instead of letting it through.
+  failurePolicy: Fail
+  webhookConfiguration:
+    # Each check makes registry and transparency log calls.
+    timeoutSeconds: 30
+  evaluation:
+    background:
+      enabled: false
+  matchConstraints:
+    # The API server sets this label on every namespace, and nobody can change it.
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: defense-up
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        # Kubernetes matches subresources separately. Without the second
+        # entry, someone could add an unsigned ephemeral container to a pod
+        # that was already admitted.
+        resources: [pods, pods/ephemeralcontainers]
+  # Check every image in the namespace, not only defense-up images. Anything
+  # this workflow didn't sign gets rejected.
+  matchImageReferences:
+    - glob: "*"
+  validationConfigurations:
+    # Don't rewrite tags to digests. The manifest must already say exactly what runs.
+    mutateDigest: false
+    # Reject any image reference that has no digest.
+    verifyDigest: true
+    # Every matched image must pass a signature or attestation check.
+    required: true
+  attestors:
+    - name: releaseWorkflow
+      cosign:
+        keyless:
+          identities:
+            # The certificate must come from GitHub Actions and name
+            # release.yml in onlydole/defense-up, running for a plain semantic
+            # version tag. This matches the tag filter in release.yml, so a
+            # branch run, a pull request, a fork, or another workflow file
+            # can't produce a signature that passes.
+            - issuer: https://token.actions.githubusercontent.com
+              subjectRegExp: '^https://github\.com/onlydole/defense-up/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
+        # The release signs with the public Sigstore instance, so the signature
+        # must also have a record in the public Rekor transparency log.
+        ctlog:
+          url: https://rekor.sigstore.dev
+  attestations:
+    # actions/attest pushes this SLSA v1 provenance to GHCR as a Sigstore
+    # bundle, attached to the same index digest that cosign signed.
+    - name: provenance
+      intoto:
+        type: https://slsa.dev/provenance/v1
+  variables:
+    - name: allImages
+      expression: >-
+        images.?containers.orValue([]) +
+        images.?initContainers.orValue([]) +
+        images.?ephemeralContainers.orValue([])
+  validations:
+    - expression: >-
+        variables.allImages.all(image, image.contains('@sha256:'))
+      message: >-
+        Every image must be referenced by digest (image@sha256:...), not by tag.
+    # Kyverno 1.20 reads every Sigstore bundle attached to the digest here,
+    # so a provenance bundle from the same identity also counts. Both come
+    # from the same release job, so either one proves the same thing.
+    - expression: >-
+        variables.allImages.map(image,
+        verifyImageSignatures(image, [attestors.releaseWorkflow])).all(e, e > 0)
+      message: >-
+        Every image must carry a keyless cosign signature from
+        onlydole/defense-up/.github/workflows/release.yml on a vX.Y.Z tag.
+    - expression: >-
+        variables.allImages.map(image,
+        verifyAttestationSignatures(image, attestations.provenance,
+        [attestors.releaseWorkflow])).all(e, e > 0)
+      message: >-
+        Every image must carry a SLSA provenance attestation from
+        onlydole/defense-up/.github/workflows/release.yml on a vX.Y.Z tag.

@@ -1,0 +1,19 @@
+# The namespace that runs defense-up.
+#
+# Pod Security Admission rejects any pod here that breaks the "restricted"
+# profile. The audit and warn labels report the same profile, so kubectl prints
+# a warning before the API server rejects a pod.
+#
+# "latest" follows the profile of the cluster's Kubernetes version. Pin a
+# version such as v1.35 if you want upgrades to leave the rules unchanged.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: defense-up
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
