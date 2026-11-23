@@ -5,7 +5,7 @@
 
 # Builder: has pip and a shell. Nothing from this stage ships except the
 # installed packages.
-FROM cgr.dev/chainguard/python:latest-dev@sha256:88d8715285b78746679a86fa126fe01e68b7940c3299ee3b4cf8245d4b17095f AS builder
+FROM cgr.dev/chainguard/python:latest-dev@sha256:e2736acdf97f2b1cb59545f4f26317b18a953e90e59fa4c212a782315b248111 AS builder
 
 WORKDIR /app
 
@@ -31,7 +31,7 @@ RUN PYTHONPATH=/app/packages PYTHONDONTWRITEBYTECODE=1 \
     python -m unittest discover --start-directory tests --top-level-directory . --verbose
 
 # Runtime: no shell, no package manager, and a non-root user by default.
-FROM cgr.dev/chainguard/python:latest@sha256:d914788ef74519450a69bc5cce6a1cc747dbefb95a3d431daa4ff707767fea8a
+FROM cgr.dev/chainguard/python:latest@sha256:f33049a06b10d6bd729e08a181094774ca5e9c7b0cf1bbe674aa977cd5258daa
 
 WORKDIR /app
 
